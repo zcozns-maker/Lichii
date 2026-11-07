@@ -318,7 +318,7 @@ void DefineEntryPoint(const IR::Program& program, EmitContext& ctx, Id main) {
                                        ? spv::ExecutionMode::VertexOrderCw
                                        : spv::ExecutionMode::VertexOrderCcw);
         break;
-    case Stage::Geometry:
+    case Stage::Geometry: {
         execution_model = spv::ExecutionModel::Geometry;
         ctx.AddCapability(spv::Capability::Geometry);
         if (ctx.profile.support_geometry_streams) {
@@ -355,8 +355,12 @@ void DefineEntryPoint(const IR::Program& program, EmitContext& ctx, Id main) {
         if (program.info.stores[IR::Attribute::PointSize]) {
             ctx.AddCapability(spv::Capability::GeometryPointSize);
         }
-        ctx.AddExecutionMode(main, spv::ExecutionMode::OutputVertices, program.output_vertices);
-        ctx.AddExecutionMode(main, spv::ExecutionMode::Invocations, program.invocations);
+        // SPIR-V requires both literals to be at least 1. A zero from an unset header is the
+        // non-instanced, single-vertex case, not a request for an illegal execution mode.
+        const u32 output_vertices{program.output_vertices == 0 ? 1u : program.output_vertices};
+        const u32 invocations{program.invocations == 0 ? 1u : program.invocations};
+        ctx.AddExecutionMode(main, spv::ExecutionMode::OutputVertices, output_vertices);
+        ctx.AddExecutionMode(main, spv::ExecutionMode::Invocations, invocations);
         if (program.is_geometry_passthrough) {
             if (ctx.profile.support_geometry_shader_passthrough) {
                 ctx.AddExtension("SPV_NV_geometry_shader_passthrough");
@@ -366,6 +370,7 @@ void DefineEntryPoint(const IR::Program& program, EmitContext& ctx, Id main) {
             }
         }
         break;
+    }
     case Stage::Fragment:
         execution_model = spv::ExecutionModel::Fragment;
         if (ctx.profile.lower_left_origin_mode) {

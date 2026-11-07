@@ -679,6 +679,26 @@ FN_MAX_LIMIT_LIST
         return properties.properties.limits.maxTessellationPatchSize;
     }
 
+    u32 GetMaxGeometryOutputComponents() const {
+        return properties.properties.limits.maxGeometryOutputComponents;
+    }
+
+    u32 GetMaxGeometryTotalOutputComponents() const {
+        return properties.properties.limits.maxGeometryTotalOutputComponents;
+    }
+
+    u32 GetMaxGeometryOutputVertices() const {
+        return properties.properties.limits.maxGeometryOutputVertices;
+    }
+
+    u32 GetMaxGeometryShaderInvocations() const {
+        return properties.properties.limits.maxGeometryShaderInvocations;
+    }
+
+    u32 GetMaxGeometryInputComponents() const {
+        return properties.properties.limits.maxGeometryInputComponents;
+    }
+
     /// Returns true if the device supports task and mesh shaders (VK_EXT_mesh_shader).
     bool IsExtMeshShaderSupported() const {
         return extensions.mesh_shader && features.mesh_shader.taskShader &&
