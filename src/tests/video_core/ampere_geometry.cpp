@@ -3,12 +3,15 @@
 
 #include <algorithm>
 #include <array>
+#include <optional>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/frontend/ampere/lower_to_maxwell.h"
 #include "shader_recompiler/frontend/ir/ir_emitter.h"
+#include "shader_recompiler/frontend/maxwell/translate_program.h"
 #include "shader_recompiler/object_pool.h"
 
 namespace {
@@ -194,4 +197,191 @@ TEST_CASE("SPIR-V geometry stream zero needs no geometry streams capability",
     REQUIRE(emits == 1);
     REQUIRE(ends == 1);
     REQUIRE(geometry == 1);
+}
+
+std::optional<u32> ExecutionModeLiteral(const std::vector<u32>& code, u32 mode) {
+    constexpr u32 OpExecutionMode = 16;
+    for (size_t offset = 5; offset < code.size();) {
+        const u32 words = code[offset] >> 16;
+        const u32 opcode = code[offset] & 0xffff;
+        if (words == 0 || offset + words > code.size()) {
+            break;
+        }
+        if (opcode == OpExecutionMode && words >= 4 && code[offset + 2] == mode) {
+            return code[offset + 3];
+        }
+        offset += words;
+    }
+    return std::nullopt;
+}
+
+u32 LocationCount(const std::vector<u32>& code) {
+    constexpr u32 OpDecorate = 71;
+    constexpr u32 Location = 30;
+    u32 count = 0;
+    for (size_t offset = 5; offset < code.size();) {
+        const u32 words = code[offset] >> 16;
+        const u32 opcode = code[offset] & 0xffff;
+        if (words == 0 || offset + words > code.size()) {
+            break;
+        }
+        count += opcode == OpDecorate && words >= 4 && code[offset + 2] == Location;
+        offset += words;
+    }
+    return count;
+}
+
+Shader::IR::Program MinimalGeometry(u32 output_vertices, u32 invocations) {
+    Shader::IR::Program program;
+    program.stage = Shader::Stage::Geometry;
+    program.output_topology = Shader::OutputTopology::PointList;
+    program.output_vertices = output_vertices;
+    program.invocations = invocations;
+    return program;
+}
+
+void FillGeneric(Shader::VaryingState& state) {
+    for (size_t index = 0; index < Shader::IR::NUM_GENERICS; ++index) {
+        for (size_t element = 0; element < 4; ++element) {
+            state.Set(Shader::IR::Attribute::Generic0X + index * 4 + element, true);
+        }
+    }
+}
+
+Shader::Maxwell::GeometryInterfaceLimits DesktopGeometryLimits() {
+    return {
+        .max_output_components = 128,
+        .max_total_output_components = 1024,
+        .max_output_vertices = 256,
+        .max_invocations = 32,
+        .max_input_components = 128,
+        .max_clip_distances = 8,
+        .declare_viewport_mask = false,
+    };
+}
+
+TEST_CASE("SPIR-V geometry execution modes are at least one vertex and one invocation",
+          "[video_core][ampere][spirv]") {
+    namespace IR = Shader::IR;
+    Shader::ObjectPool<IR::Inst> inst_pool;
+    IR::Block block{inst_pool};
+    IR::IREmitter ir{block};
+    ir.EmitVertex(ir.Imm32(0));
+    IR::Program program{MinimalGeometry(0, 0)};
+    program.blocks.push_back(&block);
+    program.post_order_blocks.push_back(&block);
+    IR::AbstractSyntaxNode block_node{};
+    block_node.type = IR::AbstractSyntaxNode::Type::Block;
+    block_node.data.block = &block;
+    IR::AbstractSyntaxNode return_node{};
+    return_node.type = IR::AbstractSyntaxNode::Type::Return;
+    program.syntax_list = {block_node, return_node};
+    Shader::Profile profile{};
+    profile.supported_spirv = 0x00010300;
+    const auto code = Shader::Backend::SPIRV::EmitSPIRV(profile, program);
+    // SPIR-V Execution Mode: Invocations = 0, OutputVertices = 26.
+    REQUIRE(ExecutionModeLiteral(code, 0) == 1);
+    REQUIRE(ExecutionModeLiteral(code, 26) == 1);
+
+    program.output_vertices = 4;
+    program.invocations = 2;
+    const auto kept = Shader::Backend::SPIRV::EmitSPIRV(profile, program);
+    REQUIRE(ExecutionModeLiteral(kept, 0) == 2);
+    REQUIRE(ExecutionModeLiteral(kept, 26) == 4);
+}
+
+TEST_CASE("Lowered geometry passthrough drops non-generic mask bits and unread outputs",
+          "[video_core][ampere][spirv]") {
+    namespace IR = Shader::IR;
+    Shader::VaryingState mask;
+    mask.Set(IR::Attribute::PositionX, true);
+    mask.Set(IR::Attribute::InstanceId, true);
+    mask.Set(IR::Attribute::VertexId, true);
+    mask.Set(IR::Attribute::Layer, true);
+    mask.Set(IR::Attribute::Generic0X, true);
+    Shader::Maxwell::RestrictLoweredGeometryPassthrough(mask);
+    REQUIRE(mask[IR::Attribute::PositionX]);
+    REQUIRE(mask[IR::Attribute::Generic0X]);
+    REQUIRE_FALSE(mask[IR::Attribute::InstanceId]);
+    REQUIRE_FALSE(mask[IR::Attribute::VertexId]);
+    REQUIRE_FALSE(mask[IR::Attribute::Layer]);
+
+    IR::Program geometry;
+    geometry.stage = Shader::Stage::Geometry;
+    geometry.is_geometry_passthrough = true;
+    geometry.output_vertices = 3;
+    geometry.invocations = 1;
+    FillGeneric(geometry.info.stores);
+    FillGeneric(geometry.info.loads);
+    FillGeneric(geometry.info.passthrough);
+    geometry.info.stores.Set(IR::Attribute::PositionX, true);
+    geometry.info.stores.Set(IR::Attribute::PositionY, true);
+    geometry.info.stores.Set(IR::Attribute::PositionZ, true);
+    geometry.info.stores.Set(IR::Attribute::PositionW, true);
+    geometry.info.stores.Set(IR::Attribute::Layer, true);
+    geometry.info.loads.Set(IR::Attribute::PositionX, true);
+    geometry.info.loads.Set(IR::Attribute::Layer, true);
+    geometry.info.passthrough.Set(IR::Attribute::PositionX, true);
+    IR::Program fragment;
+    fragment.stage = Shader::Stage::Fragment;
+    fragment.info.loads.Set(IR::Attribute::Generic2X, true);
+    fragment.info.loads.Set(IR::Attribute::Generic2Y, true);
+    fragment.info.loads.Set(IR::Attribute::Generic2Z, true);
+    fragment.info.loads.Set(IR::Attribute::Generic2W, true);
+
+    const auto limits = DesktopGeometryLimits();
+    Shader::RuntimeInfo runtime;
+    const auto before =
+        Shader::Maxwell::MeasureGeometryInterface(geometry, runtime, limits);
+    REQUIRE(before.output_components == 133);
+    REQUIRE(before.input_components == 133);
+    REQUIRE_FALSE(before.fits);
+
+    IR::Program feedback{geometry};
+    Shader::Maxwell::PruneUnreadGeometryOutputs(feedback, fragment, true, false);
+    REQUIRE(feedback.info.stores.Generic(0));
+    IR::Program native{geometry};
+    Shader::Maxwell::PruneUnreadGeometryOutputs(native, fragment, false, true);
+    REQUIRE(native.info.stores.Generic(0));
+
+    Shader::Maxwell::PruneUnreadGeometryOutputs(geometry, fragment, false, false);
+    REQUIRE(geometry.info.stores.Generic(2));
+    REQUIRE_FALSE(geometry.info.stores.Generic(0));
+    REQUIRE_FALSE(geometry.info.stores.Generic(31));
+    REQUIRE(geometry.info.stores[IR::Attribute::PositionX]);
+    REQUIRE(geometry.info.stores[IR::Attribute::Layer]);
+    REQUIRE(geometry.info.loads.Generic(2));
+    REQUIRE_FALSE(geometry.info.loads.Generic(0));
+    REQUIRE_FALSE(geometry.info.passthrough.Generic(0));
+    const auto after = Shader::Maxwell::MeasureGeometryInterface(geometry, runtime, limits);
+    REQUIRE(after.output_components == 9);
+    REQUIRE(after.input_components == 9);
+    REQUIRE(after.fits);
+}
+
+TEST_CASE("SPIR-V geometry store to a pruned output is omitted", "[video_core][ampere][spirv]") {
+    namespace IR = Shader::IR;
+    Shader::ObjectPool<IR::Inst> inst_pool;
+    IR::Block block{inst_pool};
+    IR::IREmitter ir{block};
+    ir.SetAttribute(IR::Attribute::Generic0X, ir.Imm32(1.0f), ir.Imm32(0));
+    ir.SetAttribute(IR::Attribute::Generic1X, ir.Imm32(1.0f), ir.Imm32(0));
+    ir.EmitVertex(ir.Imm32(0));
+    IR::Program program{MinimalGeometry(1, 1)};
+    program.info.stores.Set(IR::Attribute::Generic0X, true);
+    program.info.stores.Set(IR::Attribute::Generic0Y, true);
+    program.info.stores.Set(IR::Attribute::Generic0Z, true);
+    program.info.stores.Set(IR::Attribute::Generic0W, true);
+    program.blocks.push_back(&block);
+    program.post_order_blocks.push_back(&block);
+    IR::AbstractSyntaxNode block_node{};
+    block_node.type = IR::AbstractSyntaxNode::Type::Block;
+    block_node.data.block = &block;
+    IR::AbstractSyntaxNode return_node{};
+    return_node.type = IR::AbstractSyntaxNode::Type::Return;
+    program.syntax_list = {block_node, return_node};
+    Shader::Profile profile{};
+    profile.supported_spirv = 0x00010300;
+    const auto code = Shader::Backend::SPIRV::EmitSPIRV(profile, program);
+    REQUIRE(LocationCount(code) == 1);
 }

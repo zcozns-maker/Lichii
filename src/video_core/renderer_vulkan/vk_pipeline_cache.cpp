@@ -1375,6 +1375,45 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
 
         const auto runtime_info{MakeRuntimeInfo(programs, key, program, previous_stage, device)};
         ConvertLegacyToGeneric(program, runtime_info);
+        if (index == static_cast<size_t>(Maxwell::ShaderType::Geometry)) {
+            // A lowered passthrough shader that keeps every generic, position and layer declares
+            // 133 components. The AMD Windows driver fast-fails inside vkCreateGraphicsPipelines
+            // for that shader instead of returning an error (Eglantine PR 720, RX 6600, where
+            // maxGeometryOutputComponents is 128). Prune outputs the fragment shader never reads,
+            // then refuse a pipeline that still cannot fit. Checked while the pipeline is built.
+            const bool native_passthrough{program.is_geometry_passthrough &&
+                                          device.IsNvGeometryShaderPassthroughSupported()};
+            Shader::Maxwell::PruneUnreadGeometryOutputs(
+                program, programs[static_cast<size_t>(Maxwell::ShaderType::Pixel)],
+                key.state.xfb_enabled != 0, native_passthrough);
+            if (!native_passthrough) {
+                const Shader::Maxwell::GeometryInterfaceLimits limits{
+                    .max_output_components = device.GetMaxGeometryOutputComponents(),
+                    .max_total_output_components = device.GetMaxGeometryTotalOutputComponents(),
+                    .max_output_vertices = device.GetMaxGeometryOutputVertices(),
+                    .max_invocations = device.GetMaxGeometryShaderInvocations(),
+                    .max_input_components = device.GetMaxGeometryInputComponents(),
+                    .max_clip_distances = profile.max_user_clip_distances,
+                    .declare_viewport_mask = profile.support_viewport_mask,
+                };
+                const auto footprint{
+                    Shader::Maxwell::MeasureGeometryInterface(program, runtime_info, limits)};
+                if (!footprint.fits) {
+                    LOG_WARNING(Render_Vulkan,
+                                "Skipping geometry pipeline {:#016x}: {} output components "
+                                "(limit {}), {} input components (limit {}), {} vertices "
+                                "(limit {}), {} invocations (limit {}), {} total output "
+                                "components (limit {})",
+                                hash, footprint.output_components, limits.max_output_components,
+                                footprint.input_components, limits.max_input_components,
+                                footprint.output_vertices, limits.max_output_vertices,
+                                footprint.invocations, limits.max_invocations,
+                                footprint.total_output_components,
+                                limits.max_total_output_components);
+                    return nullptr;
+                }
+            }
+        }
         if (emit_pools) {
             deferred_runtime_infos[stage_index] = runtime_info;
             if (VideoCommon::Nx2Perf::Verify()) {

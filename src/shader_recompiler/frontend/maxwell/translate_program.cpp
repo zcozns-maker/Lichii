@@ -356,6 +356,93 @@ void TightenOutputVertices(IR::Program& program) {
 }
 } // Anonymous namespace
 
+void RestrictLoweredGeometryPassthrough(VaryingState& mask) {
+    for (size_t index = 0; index < mask.mask.size(); ++index) {
+        if (index < static_cast<size_t>(IR::Attribute::PositionX) ||
+            index > static_cast<size_t>(IR::Attribute::Generic31W)) {
+            mask.mask[index] = false;
+        }
+    }
+}
+
+void PruneUnreadGeometryOutputs(IR::Program& geometry, const IR::Program& fragment,
+                                bool transform_feedback, bool native_passthrough) {
+    const Shader::Info& fragment_info{fragment.info};
+    VaryingState& stores{geometry.info.stores};
+    if (fragment.stage != Stage::Fragment || transform_feedback ||
+        (geometry.is_geometry_passthrough && native_passthrough) ||
+        fragment_info.loads_indexed_attributes || fragment_info.loads.Legacy() || stores.Legacy()) {
+        return;
+    }
+    for (size_t index = 0; index < IR::NUM_GENERICS; ++index) {
+        if (fragment_info.loads.Generic(index)) {
+            continue;
+        }
+        for (size_t element = 0; element < 4; ++element) {
+            const IR::Attribute attribute{IR::Attribute::Generic0X + index * 4 + element};
+            stores.Set(attribute, false);
+            // Lowered passthrough only reads a generic in order to copy it. A real geometry
+            // shader may consume an input without forwarding it, so its loads stay.
+            if (geometry.is_geometry_passthrough) {
+                geometry.info.loads.Set(attribute, false);
+                geometry.info.passthrough.Set(attribute, false);
+            }
+        }
+    }
+}
+
+namespace {
+u32 ScalarInput(bool declared) {
+    return declared ? 1u : 0u;
+}
+} // namespace
+
+GeometryInterfaceFootprint MeasureGeometryInterface(const IR::Program& geometry,
+                                                    const RuntimeInfo& runtime_info,
+                                                    GeometryInterfaceLimits limits) {
+    const Shader::Info& info{geometry.info};
+    GeometryInterfaceFootprint footprint;
+    footprint.output_vertices = geometry.output_vertices == 0 ? 1u : geometry.output_vertices;
+    footprint.invocations = geometry.invocations == 0 ? 1u : geometry.invocations;
+    if (runtime_info.convert_depth_mode || info.stores.AnyComponent(IR::Attribute::PositionX)) {
+        footprint.output_components += 4;
+    }
+    if (info.stores[IR::Attribute::PointSize] || runtime_info.fixed_state_point_size) {
+        footprint.output_components += 1;
+    }
+    if (info.stores.ClipDistances() && limits.max_clip_distances > 0) {
+        footprint.output_components += (std::min)(limits.max_clip_distances, 8u);
+    }
+    footprint.output_components += ScalarInput(info.stores[IR::Attribute::Layer]);
+    footprint.output_components += ScalarInput(info.stores[IR::Attribute::ViewportIndex]);
+    if (limits.declare_viewport_mask) {
+        footprint.output_components += ScalarInput(info.stores[IR::Attribute::ViewportMask]);
+    }
+    if (info.loads.AnyComponent(IR::Attribute::PositionX) ||
+        info.passthrough.AnyComponent(IR::Attribute::PositionX)) {
+        footprint.input_components += 4;
+    }
+    footprint.input_components += ScalarInput(info.loads[IR::Attribute::PrimitiveId]);
+    footprint.input_components += ScalarInput(info.loads[IR::Attribute::Layer]);
+    footprint.input_components += ScalarInput(info.loads[IR::Attribute::PointSize]);
+    for (size_t index = 0; index < IR::NUM_GENERICS; ++index) {
+        if (info.stores.Generic(index)) {
+            footprint.output_components += 4;
+        }
+        if (info.loads.Generic(index) || info.passthrough.Generic(index)) {
+            footprint.input_components += 4;
+        }
+    }
+    footprint.total_output_components =
+        static_cast<u64>(footprint.output_vertices) * footprint.output_components;
+    footprint.fits = footprint.output_components <= limits.max_output_components &&
+                     footprint.input_components <= limits.max_input_components &&
+                     footprint.output_vertices <= limits.max_output_vertices &&
+                     footprint.invocations <= limits.max_invocations &&
+                     footprint.total_output_components <= limits.max_total_output_components;
+    return footprint;
+}
+
 IR::Program TranslateProgram(ObjectPool<IR::Inst>& inst_pool, ObjectPool<IR::Block>& block_pool,
                              Environment& env, Flow::CFG& cfg, const HostTranslateInfo& host_info) {
     HostTranslateInfo normalized_host_info{host_info};
@@ -386,6 +473,7 @@ IR::Program TranslateProgram(ObjectPool<IR::Inst>& inst_pool, ObjectPool<IR::Blo
             }
 
             if (!normalized_host_info.support_geometry_shader_passthrough) {
+                RestrictLoweredGeometryPassthrough(program.info.passthrough);
                 program.output_vertices = GetOutputTopologyVertices(program.output_topology);
                 LowerGeometryPassthrough(program, normalized_host_info);
             }
