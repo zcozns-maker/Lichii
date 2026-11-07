@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -357,6 +358,45 @@ TEST_CASE("Lowered geometry passthrough drops non-generic mask bits and unread o
     REQUIRE(after.output_components == 9);
     REQUIRE(after.input_components == 9);
     REQUIRE(after.fits);
+
+    const std::string lowered{Shader::Maxwell::FormatGeometryPipelineDiag(
+        0x0123456789abcdefULL, 0xfedcba9876543210ULL, "disk", geometry, fragment, runtime, limits,
+        false, false)};
+    REQUIRE(lowered.find('\n') == std::string::npos);
+    REQUIRE(lowered.find("Nx2Geom pipeline=0123456789abcdef s4=fedcba9876543210 source=disk ") ==
+            0);
+    REQUIRE(lowered.find("passthrough=lowered") != std::string::npos);
+    REQUIRE(lowered.find("runtime_geom=0") != std::string::npos);
+    REQUIRE(lowered.find("position_mask=1") != std::string::npos);
+    REQUIRE(lowered.find("position_copy=1") != std::string::npos);
+    REQUIRE(lowered.find("position_out=1") != std::string::npos);
+    REQUIRE(lowered.find("fs_generics=1") != std::string::npos);
+    REQUIRE(lowered.find("fits=1") != std::string::npos);
+    REQUIRE(lowered.find("refused=0") != std::string::npos);
+
+    IR::Program ordinary;
+    ordinary.stage = Shader::Stage::Geometry;
+    ordinary.output_vertices = 1024;
+    ordinary.invocations = 1;
+    ordinary.info.stores.Set(IR::Attribute::PositionX, true);
+    FillGeneric(ordinary.info.stores);
+    const std::string wide{Shader::Maxwell::FormatGeometryPipelineDiag(
+        1, 2, "runtime-async", ordinary, fragment, runtime, limits, true, false)};
+    REQUIRE(wide.find("passthrough=none") != std::string::npos);
+    REQUIRE(wide.find("runtime_geom=1") != std::string::npos);
+    REQUIRE(wide.find("position_copy=0") != std::string::npos);
+    REQUIRE(wide.find("source=runtime-async") != std::string::npos);
+    REQUIRE(wide.find("fits=0") != std::string::npos);
+    REQUIRE(wide.find("refused=1") != std::string::npos);
+
+    IR::Program header{geometry};
+    header.is_geometry_passthrough = true;
+    const std::string kept{Shader::Maxwell::FormatGeometryPipelineDiag(
+        3, 4, "runtime-gpu", header, fragment, runtime, limits, true, false)};
+    REQUIRE(kept.find("passthrough=header") != std::string::npos);
+    REQUIRE(kept.find("position_copy=0") != std::string::npos);
+    REQUIRE(kept.find("runtime_geom=0") != std::string::npos);
+    REQUIRE(kept.find("refused=0") != std::string::npos);
 }
 
 TEST_CASE("SPIR-V geometry store to a pruned output is omitted", "[video_core][ampere][spirv]") {

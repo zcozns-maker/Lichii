@@ -12,9 +12,12 @@
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
+#include <string_view>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 #include <bit>
 #include <numeric>
@@ -966,8 +969,9 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
                         for (auto& env : envs) {
                             env_ptrs.push_back(&env);
                         }
-                        auto pipeline =
-                            CreateGraphicsPipeline(pools, key, MakeSpan(env_ptrs), nullptr, false);
+                        auto pipeline = CreateGraphicsPipeline(pools, key, MakeSpan(env_ptrs),
+                                                              nullptr, false, nullptr, nullptr,
+                                                              "disk");
                         if (pipeline && pipeline->Failed()) {
                             return std::unique_ptr<GraphicsPipeline>{};
                         }
@@ -986,7 +990,8 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
                 env_ptrs.push_back(&env);
             }
             auto pipeline{CreateGraphicsPipeline(pools, key, MakeSpan(env_ptrs),
-                                                 state.statistics.get(), false)};
+                                                 state.statistics.get(), false, nullptr, nullptr,
+                                                 "disk")};
 
             std::scoped_lock lock{state.mutex};
             if (pipeline) {
@@ -1241,7 +1246,8 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     ShaderPools& pools, const GraphicsPipelineCacheKey& key,
     std::span<Shader::Environment* const> envs, PipelineStatistics* statistics,
     bool build_in_parallel, std::shared_ptr<ShaderPools> emit_pools,
-    std::unique_ptr<EmissionBudget::Reservation> reservation) try {
+    std::unique_ptr<EmissionBudget::Reservation> reservation,
+    const char* geometry_diag_source) try {
     auto hash = key.Hash();
     LOG_DEBUG(Render_Vulkan, "{:#016x}", hash);
     size_t env_index{0};
@@ -1386,16 +1392,32 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             Shader::Maxwell::PruneUnreadGeometryOutputs(
                 program, programs[static_cast<size_t>(Maxwell::ShaderType::Pixel)],
                 key.state.xfb_enabled != 0, native_passthrough);
+            const Shader::Maxwell::GeometryInterfaceLimits limits{
+                .max_output_components = device.GetMaxGeometryOutputComponents(),
+                .max_total_output_components = device.GetMaxGeometryTotalOutputComponents(),
+                .max_output_vertices = device.GetMaxGeometryOutputVertices(),
+                .max_invocations = device.GetMaxGeometryShaderInvocations(),
+                .max_input_components = device.GetMaxGeometryInputComponents(),
+                .max_clip_distances = profile.max_user_clip_distances,
+                .declare_viewport_mask = profile.support_viewport_mask,
+            };
+            const char* source{geometry_diag_source != nullptr ? geometry_diag_source : "runtime"};
+            if (std::string_view{source} == "runtime") {
+                source = emit_pools ? "runtime-async" : "runtime-gpu";
+            }
+            const std::string diag{Shader::Maxwell::FormatGeometryPipelineDiag(
+                hash, key.unique_hashes[index], source, program,
+                programs[static_cast<size_t>(Maxwell::ShaderType::Pixel)], runtime_info, limits,
+                device.IsNvGeometryShaderPassthroughSupported(), is_emulated_stage)};
+            {
+                static std::mutex logged_mutex;
+                static std::unordered_set<u64> logged;
+                std::scoped_lock lock{logged_mutex};
+                if (logged.insert(hash).second) {
+                    LOG_INFO(Render_Vulkan, "{}", diag);
+                }
+            }
             if (!native_passthrough) {
-                const Shader::Maxwell::GeometryInterfaceLimits limits{
-                    .max_output_components = device.GetMaxGeometryOutputComponents(),
-                    .max_total_output_components = device.GetMaxGeometryTotalOutputComponents(),
-                    .max_output_vertices = device.GetMaxGeometryOutputVertices(),
-                    .max_invocations = device.GetMaxGeometryShaderInvocations(),
-                    .max_input_components = device.GetMaxGeometryInputComponents(),
-                    .max_clip_distances = profile.max_user_clip_distances,
-                    .declare_viewport_mask = profile.support_viewport_mask,
-                };
                 const auto footprint{
                     Shader::Maxwell::MeasureGeometryInterface(program, runtime_info, limits)};
                 if (!footprint.fits) {

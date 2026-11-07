@@ -9,8 +9,12 @@
 #include <bitset>
 #include <memory>
 #include <optional>
+#include <string>
+#include <string_view>
 #include <vector>
 #include <queue>
+
+#include <fmt/format.h>
 
 #include "common/settings.h"
 #include "shader_recompiler/exception.h"
@@ -441,6 +445,73 @@ GeometryInterfaceFootprint MeasureGeometryInterface(const IR::Program& geometry,
                      footprint.invocations <= limits.max_invocations &&
                      footprint.total_output_components <= limits.max_total_output_components;
     return footprint;
+}
+
+namespace {
+u32 CountGenerics(const VaryingState& state) {
+    u32 count{};
+    for (size_t index = 0; index < IR::NUM_GENERICS; ++index) {
+        count += state.Generic(index) ? 1u : 0u;
+    }
+    return count;
+}
+
+u32 CountDeclaredInputGenerics(const Shader::Info& info) {
+    u32 count{};
+    for (size_t index = 0; index < IR::NUM_GENERICS; ++index) {
+        count += (info.loads.Generic(index) || info.passthrough.Generic(index)) ? 1u : 0u;
+    }
+    return count;
+}
+
+const char* PassthroughKind(const IR::Program& geometry, bool native_passthrough_supported,
+                            bool layer_emulated) {
+    if (layer_emulated) {
+        return "layer";
+    }
+    if (!geometry.is_geometry_passthrough) {
+        return "none";
+    }
+    return native_passthrough_supported ? "header" : "lowered";
+}
+} // namespace
+
+std::string FormatGeometryPipelineDiag(
+    u64 pipeline_hash, u64 geometry_hash, std::string_view source, const IR::Program& geometry,
+    const IR::Program& fragment, const RuntimeInfo& runtime_info, GeometryInterfaceLimits limits,
+    bool native_passthrough_supported, bool layer_emulated) {
+    const GeometryInterfaceFootprint footprint{
+        MeasureGeometryInterface(geometry, runtime_info, limits)};
+    const bool position_mask{geometry.info.passthrough.AnyComponent(IR::Attribute::PositionX)};
+    const bool position_in{geometry.info.loads.AnyComponent(IR::Attribute::PositionX) ||
+                           position_mask};
+    const bool position_out{runtime_info.convert_depth_mode ||
+                            geometry.info.stores.AnyComponent(IR::Attribute::PositionX)};
+    const char* const kind{
+        PassthroughKind(geometry, native_passthrough_supported, layer_emulated)};
+    const bool position_copy{std::string_view{kind} == "lowered" && position_mask};
+    // Same test MakeRuntimeInfo uses before it treats the vertex stage as the last stage.
+    const bool runtime_geom{geometry_hash != 0 && !geometry.is_geometry_passthrough};
+    const int fs_generics{fragment.stage == Stage::Fragment
+                              ? static_cast<int>(CountGenerics(fragment.info.loads))
+                              : -1};
+    // Matches the pipeline builder: a native passthrough header is not refused for size.
+    const bool native_passthrough_path{geometry.is_geometry_passthrough &&
+                                       native_passthrough_supported && !layer_emulated};
+    const bool refuse{!native_passthrough_path && !footprint.fits};
+    return fmt::format(
+        "Nx2Geom pipeline={:016x} s4={:016x} source={} passthrough={} runtime_geom={} "
+        "position_mask={} position_in={} position_out={} position_copy={} generics_in={} "
+        "generics_out={} fs_generics={} vertices={} invocations={} out_comp={}/{} in_comp={}/{} "
+        "total={}/{} vert_limit={} inv_limit={} fits={} refused={}",
+        pipeline_hash, geometry_hash, source, kind, runtime_geom ? 1 : 0, position_mask ? 1 : 0,
+        position_in ? 1 : 0, position_out ? 1 : 0, position_copy ? 1 : 0,
+        CountDeclaredInputGenerics(geometry.info), CountGenerics(geometry.info.stores), fs_generics,
+        footprint.output_vertices, footprint.invocations, footprint.output_components,
+        limits.max_output_components, footprint.input_components, limits.max_input_components,
+        footprint.total_output_components, limits.max_total_output_components,
+        limits.max_output_vertices, limits.max_invocations, footprint.fits ? 1 : 0,
+        refuse ? 1 : 0);
 }
 
 IR::Program TranslateProgram(ObjectPool<IR::Inst>& inst_pool, ObjectPool<IR::Block>& block_pool,

@@ -3,6 +3,9 @@
 
 #pragma once
 
+#include <string>
+#include <string_view>
+
 #include "shader_recompiler/environment.h"
 #include "shader_recompiler/frontend/ir/basic_block.h"
 #include "shader_recompiler/frontend/ir/program.h"
@@ -64,6 +67,14 @@ struct GeometryInterfaceFootprint {
 // output_vertices and invocations of 0 are reported as 1, matching execution-mode emission.
 [[nodiscard]] GeometryInterfaceFootprint MeasureGeometryInterface(
     const IR::Program& geometry, const RuntimeInfo& runtime_info, GeometryInterfaceLimits limits);
+
+// One Nx2Geom line for a geometry pipeline. Describes the program that will be emitted.
+// It does not change lowering. runtime_geom is the vertex-stage test
+// (geometry hash present and the passthrough bit clear).
+[[nodiscard]] std::string FormatGeometryPipelineDiag(
+    u64 pipeline_hash, u64 geometry_hash, std::string_view source, const IR::Program& geometry,
+    const IR::Program& fragment, const RuntimeInfo& runtime_info, GeometryInterfaceLimits limits,
+    bool native_passthrough_supported, bool layer_emulated);
 
 // Maxwell v1 and older Nvidia cards don't support setting gl_Layer from non-geometry stages.
 // This creates a workaround by setting the layer as a generic output and creating a

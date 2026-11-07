@@ -148,7 +148,8 @@ private:
         ShaderPools& pools, const GraphicsPipelineCacheKey& key,
         std::span<Shader::Environment* const> envs, PipelineStatistics* statistics,
         bool build_in_parallel, std::shared_ptr<ShaderPools> emit_pools = nullptr,
-        std::unique_ptr<EmissionBudget::Reservation> reservation = nullptr);
+        std::unique_ptr<EmissionBudget::Reservation> reservation = nullptr,
+        const char* geometry_diag_source = "runtime");
 
     ComputePipelineCacheEntry CreateComputePipeline(const ComputePipelineCacheKey& key,
                                                      const ShaderInfo* shader);

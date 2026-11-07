@@ -366,7 +366,11 @@ void DefineEntryPoint(const IR::Program& program, EmitContext& ctx, Id main) {
                 ctx.AddExtension("SPV_NV_geometry_shader_passthrough");
                 ctx.AddCapability(spv::Capability::GeometryShaderPassthroughNV);
             } else {
-                LOG_WARNING(Shader_SPIRV, "Geometry shader passthrough used with no support");
+                // LowerGeometryPassthrough already copied outputs. The passthrough bit stays set,
+                // so this is not an unhandled passthrough shader.
+                LOG_WARNING(Shader_SPIRV,
+                            "Geometry shader passthrough lowered: no "
+                            "VK_NV_geometry_shader_passthrough, outputs are copied in the shader");
             }
         }
         break;
